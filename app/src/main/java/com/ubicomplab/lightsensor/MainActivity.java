@@ -31,7 +31,10 @@ import com.google.android.gms.location.LocationRequest;
 //import android.location.LocationRequest;
 import android.os.Bundle;
 import android.os.CountDownTimer;
+import android.os.Handler;
+import android.os.HandlerThread;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.util.Log;
 import android.view.View;
 import android.widget.Button;
@@ -50,6 +53,7 @@ import com.google.android.gms.tasks.OnFailureListener;
 import com.google.android.gms.tasks.OnSuccessListener;
 import com.google.android.gms.tasks.Task;
 
+import java.io.BufferedWriter;
 import java.io.File;
 import java.io.FileWriter;
 import java.io.IOException;
@@ -59,10 +63,9 @@ import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.ConcurrentLinkedQueue;
 
 public class MainActivity extends AppCompatActivity {
-    float x, y, z, w, accuracy;
-    double roll_x, pitch_y, yaw_z;
     double longitude;
     double latitude;
     TextView textview;
@@ -75,42 +78,40 @@ public class MainActivity extends AppCompatActivity {
     private Button verticalCalibrateButton;
     private Button horizontalCalibrateButton;
     private Button logNoteButton;
-    private ArrayList<String> data;
     boolean logging;
+    private volatile boolean keepRunning = true; // Used in location and notes file logging.
     String startTimestamp;
     private Activity mainActivity;
-    String rotationData = "";
-    float lightSensorValue;
-    CountDownTimer countdownTimer;
-    private String noteColumnValue;
-    private String accelReading;
 
-    float horizontal_x_avg = 0;
-    float horizontal_y_avg = 0;
-    float horizontal_z_avg = 0;
-    float horizontal_w_avg = 0;
-    double horizontal_roll_x_avg = 0;
-    double horizontal_pitch_y_avg = 0;
-    double horizontal_yaw_z_avg = 0;
-    float horizontal_accuracy_avg = 0;
+    private SensorManager mySensorManager;
 
-    float vertical_x_avg = 0;
-    float vertical_y_avg = 0;
-    float vertical_z_avg = 0;
-    float vertical_w_avg = 0;
-    double vertical_roll_x_avg = 0;
-    double vertical_pitch_y_avg = 0;
-    double vertical_yaw_z_avg = 0;
-    float vertical_accuracy_avg = 0;
+    private Sensor lightSensor;
+    private SensorLogger lightSensorLogger;
 
-    //private SensorManager sensorManager;
     private Sensor rotationSensor;
+    private SensorLogger rotationSensorLogger;
+
     private Sensor accelerometer;
+    private SensorLogger accelerometerLogger;
+
+    private Sensor gyroscope;
+    private SensorLogger gyroscopeLogger;
+
+    private Sensor magnetometer;
+    private SensorLogger magnetometerLogger;
 
     private LocationRequest locationRequest;
     private LocationCallback locationCallback;
     private FusedLocationProviderClient mFusedLocationClient;
-    private Location mcurrentLocation;
+
+    // For logging the location and notes:
+    private ConcurrentLinkedQueue<String> locationQueue = new ConcurrentLinkedQueue<>();
+    private ConcurrentLinkedQueue<String> notesQueue = new ConcurrentLinkedQueue<>();
+    private Thread locationFileWritingThread = null;
+    private Thread notesFileWritingThread = null;
+    private File locationOutputFile;
+    private File notesOutputFile;
+    private int restartCounter;
 
     // Requesting permissions
     private static final int REQUEST_PERMISSIONS = 1;
@@ -120,6 +121,127 @@ public class MainActivity extends AppCompatActivity {
             Manifest.permission.WRITE_EXTERNAL_STORAGE,
             Manifest.permission.READ_EXTERNAL_STORAGE,
             Manifest.permission.ACCESS_NETWORK_STATE};
+
+    public class SensorEventWriter implements SensorEventListener {
+        private BufferedWriter bufferedWriter;
+
+        public SensorEventWriter(BufferedWriter bufferedWriter) {
+            this.bufferedWriter = bufferedWriter;
+        }
+
+        @Override
+        public void onSensorChanged(SensorEvent event) {
+            // Process sensor data (e.g., write to a file)
+            writeSensorDataToFile(event);
+            if (event.sensor.getType() == Sensor.TYPE_LIGHT) {
+                //textview.setText("LIGHT: " + event.values[0]);
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        // Update your TextView here
+                        textview.setText("LIGHT: " + event.values[0]);
+                    }
+                });
+                Log.i("Sensor OnChange", "Light even found!" + event.values[0]);
+            }
+        }
+
+        @Override
+        public void onAccuracyChanged(Sensor sensor, int accuracy) {
+            // Handle sensor accuracy changes if needed
+        }
+
+        private void writeSensorDataToFile(SensorEvent event) {
+            try {
+                // Prepare the data string in CSV format
+                StringBuilder dataString = new StringBuilder();
+                long eventTimeInMillis = (
+                        event.timestamp / 1000000L) + System.currentTimeMillis() - SystemClock.elapsedRealtime();
+
+                dataString.append(eventTimeInMillis).append(","); // Timestamp
+
+                // Append sensor values
+                for (float value : event.values) {
+                    dataString.append(value).append(",");
+                }
+                // Remove the last comma
+                dataString.deleteCharAt(dataString.length() - 1);
+                // Write to file and add a new line
+                bufferedWriter.write(dataString.toString());
+                bufferedWriter.newLine();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+    }
+
+    public class SensorLogger {
+        private SensorManager sensorManager;
+        private Sensor sensor;
+        private String sensorType;
+
+        private SensorEventListener sensorEventListener;
+        private HandlerThread handlerThread;
+        private BufferedWriter bufferedWriter;
+
+        public SensorLogger(SensorManager sensorManager, Sensor sensor, String sensorType) {
+
+            this.sensorManager = sensorManager;
+            this.sensor = sensor;
+            this.sensorType = sensorType;
+        }
+
+        public void register(String commonFileName) {
+            if (this.sensor != null) {
+                this.handlerThread = new HandlerThread(this.sensorType + "SensorThread");
+                this.handlerThread.start();
+                Handler sensorHandler = new Handler(this.handlerThread.getLooper());
+                // Initialize BufferedWriter
+                File file = new File(getExternalFilesDir(null), commonFileName + "_" + this.sensorType + ".csv");
+                try {
+                    this.bufferedWriter = new BufferedWriter(new FileWriter(file, true)); // 'true' to append
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+                // Initialize your sensor event listener
+                this.sensorEventListener = new SensorEventWriter(this.bufferedWriter);
+                this.sensorManager.registerListener(this.sensorEventListener,
+                        this.sensor, this.sensorManager.SENSOR_DELAY_NORMAL, sensorHandler);
+            } else {
+                Log.i("SENSOR!", sensorType + " NOT Available");
+            }
+        }
+
+        public void close() {
+            // Unregister the sensor listener
+            if (this.sensorEventListener != null) {
+                this.sensorManager.unregisterListener(this.sensorEventListener);
+                this.sensorEventListener = null;
+            }
+
+            // Close the BufferedWriter
+            try {
+                if (this.bufferedWriter != null) {
+                    this.bufferedWriter.close();
+                    this.bufferedWriter = null;
+                }
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+
+            // Stop the HandlerThread
+            if (this.handlerThread != null) {
+                this.handlerThread.quitSafely();
+                try {
+                    this.handlerThread.join();
+                    this.handlerThread = null;
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                }
+            }
+        }
+    }
+
 
     @Override
     public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions,
@@ -135,13 +257,12 @@ public class MainActivity extends AppCompatActivity {
 
     // Trigger new location updates at interval
     protected void startLocationUpdates() {
-        // Set up the reocuring request.
+        // Set up the reoccurring request.
         locationRequest = new LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 5000)
                 .setWaitForAccurateLocation(false)
                 .setMinUpdateIntervalMillis(1000)
                 .setMaxUpdateDelayMillis(5000)
                 .build();
-
 
         // Added location settings request?
         LocationSettingsRequest.Builder builder = new LocationSettingsRequest.Builder()
@@ -164,26 +285,10 @@ public class MainActivity extends AppCompatActivity {
                 if (e instanceof ResolvableApiException) {
                     // Location settings are not satisfied, but this can be fixed
                     // by showing the user a dialog.
-                    /*
-                    try {
-                        // Show the dialog by calling startResolutionForResult(),
-                        // and check the result in onActivityResult().
-                        ResolvableApiException resolvable = (ResolvableApiException) e;
-                        resolvable.startResolutionForResult(MainActivity.this,
-                                REQUEST_CHECK_SETTINGS);
-                    } catch (IntentSender.SendIntentException sendEx) {
-                        // Ignore the error.
-                    }
-                    */
                 }
             }
         });
 
-        //locationRequest = LocationRequest.create();
-        //locationRequest.setPriority(LocationRequest.PRIORITY_HIGH_ACCURACY);
-        //locationRequest.setInterval(10 * 1000);
-        //locationRequest.setFastestInterval(2 * 1000);
-        //locationRequest.setMaxWaitTime(10 * 1000);
         Toast.makeText(mainActivity, "Starting Location Updates!", Toast.LENGTH_SHORT).show();
 
         Log.i("LOCATION", "Starting location requests.");
@@ -199,9 +304,17 @@ public class MainActivity extends AppCompatActivity {
                 }
                 for (Location location : locationResult.getLocations()) {
                     if (location != null) {
+                        // TODO add to concurrently linked queue and have a separate thread to append to file.
                         latitude = location.getLatitude();
                         longitude = location.getLongitude();
-                        locationIndicator.setText(String.format(Locale.US, "%s -- %s", latitude, longitude));
+                        String locationString = String.format(Locale.US, "%s -- %s", latitude, longitude);
+                        long timestamp = System.currentTimeMillis();
+                        String locationRow = timestamp + "," + locationString;
+                        // Only offer to queue if the start button has been pressed.
+                        if (locationFileWritingThread != null) {
+                            locationQueue.offer(locationRow);
+                        }
+                        locationIndicator.setText(locationString);
                         Log.i("LOCATION", "Got a location at " + latitude + " " + longitude);
                         Toast.makeText(mainActivity, "LocationCallback SUCCESS!", Toast.LENGTH_SHORT).show();
                     }
@@ -212,7 +325,9 @@ public class MainActivity extends AppCompatActivity {
         // Just a check to make sure locationClient is defined.
         if (mFusedLocationClient == null) {
             mFusedLocationClient = LocationServices.getFusedLocationProviderClient(this);
-            if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED && ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            if (ActivityCompat.checkSelfPermission(this,
+                    Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED && ActivityCompat.checkSelfPermission(
+                            this, Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
                 // TODO: Consider calling
                 //    ActivityCompat#requestPermissions
                 // here to request the missing permissions, and then overriding
@@ -227,15 +342,7 @@ public class MainActivity extends AppCompatActivity {
         // Connection locationClient to locationRequest and callback.
         mFusedLocationClient.requestLocationUpdates(locationRequest,
                 locationCallback,
-                Looper.getMainLooper());//Looper.myLooper());
-    }
-
-    public void logDataRow() {
-        long timestamp = new Date().getTime();
-        String row = timestamp + "," + lightSensorValue + "," + latitude + "," + longitude + "," + rotationData + "," + noteColumnValue + "\n";
-        data.add(row);
-        // Reset the note column to null after you log it once.
-        noteColumnValue = "-";
+                Looper.getMainLooper());
     }
 
     @Override
@@ -250,115 +357,74 @@ public class MainActivity extends AppCompatActivity {
         File file = new File(getExternalFilesDir(null), "file.csv");
         Log.i("filepath!", "" + file.getParent());
 
+        restartCounter = 0;
         logging = false;
         Log.i("date", "" + new Date().getTime());
+
+        // Initialize the IMU sensors.
+        mySensorManager = (SensorManager) getSystemService(SENSOR_SERVICE);
+        lightSensor = mySensorManager.getDefaultSensor(Sensor.TYPE_LIGHT);
+        lightSensorLogger = new SensorLogger(
+                mySensorManager, lightSensor, "light");
+        rotationSensor = mySensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR);
+        rotationSensorLogger = new SensorLogger(
+                mySensorManager, rotationSensor, "rotation");
+        accelerometer = mySensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
+        accelerometerLogger = new SensorLogger(
+                mySensorManager, accelerometer, "accelerometer");
+        gyroscope = mySensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE);
+        gyroscopeLogger = new SensorLogger(
+                mySensorManager, gyroscope, "gyroscope");
+        magnetometer = mySensorManager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD);
+        magnetometerLogger = new SensorLogger(
+                mySensorManager, magnetometer, "magnetometer");
 
         textview = findViewById(R.id.indicator);
         locationIndicator = findViewById(R.id.location);
         rotationIndicator = findViewById(R.id.rotation);
         generalIndicator = findViewById(R.id.general_indicator);
         noteInput = findViewById(R.id.plain_text_input);
-        //locationManager = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
 
         startButton = findViewById(R.id.start);
         stopButton = findViewById(R.id.stop);
         verticalCalibrateButton = findViewById(R.id.vertical_calibrate);
         horizontalCalibrateButton = findViewById(R.id.horizontal_calibrate);
         logNoteButton = findViewById(R.id.logNote);
-        //saveButton = findViewById(R.id.save);
-        startButton.setEnabled(false);
+        startButton.setEnabled(true);
         stopButton.setEnabled(false);
+        horizontalCalibrateButton.setEnabled(false);
         verticalCalibrateButton.setEnabled(false);
         logNoteButton.setEnabled(false);
 
         // Get last known location as a baseline.
-        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED && ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+        if (ActivityCompat.checkSelfPermission(this,
+                Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED && ActivityCompat.checkSelfPermission(
+                        this, Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
             return;
         }
-        /*
-        mFusedLocationClient.getLastLocation()
-                .addOnSuccessListener(this, new OnSuccessListener<Location>() {
-                    @Override
-                    public void onSuccess(Location location) {
-                        // Got last known location. In some rare situations this can be null.
-                        if (location != null) {
-                            locationIndicator.setText("Last known location is NULL...");
-                        } else {
-                            locationIndicator.setText("Last known location is " + location.getLatitude() + ", " + location.getLongitude());
-                        }
-                        mcurrentLocation = location;
-                    }
-                });
-        */
+
         startLocationUpdates();
 
-        /*
-        LocationManager lm = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
-        boolean gps_enabled = false;
-        try {
-            gps_enabled = lm.isProviderEnabled(LocationManager.GPS_PROVIDER);
-        } catch (Exception ex) {
-        }
 
-        boolean network_enabled = false;
-        try {
-            network_enabled = lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER);
-        } catch (Exception ex) {
-        }
-        Log.i("LOCATION", "GPS enabled? " + gps_enabled + " Network enabled? " + network_enabled);
-         */
-
-        /*
-        Location mockLocation = new Location(LocationManager.GPS_PROVIDER);
-        mockLocation.setLatitude(1.2797677);
-        mockLocation.setLongitude(103.8459285);
-        mockLocation.setAltitude(0);
-        mockLocation.setTime(System.currentTimeMillis());
-        mockLocation.setAccuracy(1);
-        mFusedLocationClient.setMockLocation(mockLocation);
-        Log.i("mocked location", "" + mockLocation.toString());
-        */
-
+        // TODO just save the start and stop time of calibration and use this to grab values from respective files.
         horizontalCalibrateButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
+                long timestamp = System.currentTimeMillis();
+                String row = timestamp + ",STARTED HORIZONTAL CALIBRATION";
+                notesQueue.offer(row);
+                horizontalCalibrateButton.setEnabled(false);
                 new CountDownTimer(3000, 1000) {
-                    float x_avg = 0;
-                    float y_avg = 0;
-                    float z_avg = 0;
-                    float w_avg = 0;
-                    double roll_x_avg = 0;
-                    double pitch_y_avg = 0;
-                    double yaw_z_avg = 0;
-                    float accuracy_avg = 0;
-                    float count = 0;
 
                     public void onTick(long millisUntilFinished) {
-                        generalIndicator.setText("seconds remaining: " + millisUntilFinished / 1000);
-
-                        x_avg += x;
-                        y_avg += y;
-                        z_avg += z;
-                        w_avg += w;
-                        roll_x_avg += roll_x;
-                        pitch_y_avg += pitch_y;
-                        yaw_z_avg += yaw_z;
-                        accuracy_avg += accuracy;
-                        count += 1;
+                        Log.i("TICK", "TOCK");
                     }
 
                     public void onFinish() {
-                        generalIndicator.setText("Done with Horizontal Calibration");
-                        horizontalCalibrateButton.setEnabled(false);
+                        long timestamp = System.currentTimeMillis();
+                        String row = timestamp + ",ENDED HORIZONTAL CALIBRATION";
+                        notesQueue.offer(row);
                         verticalCalibrateButton.setEnabled(true);
-                        horizontal_x_avg = x_avg / count;
-                        horizontal_y_avg = y_avg / count;
-                        horizontal_z_avg = z_avg / count;
-                        horizontal_w_avg = w_avg / count;
-                        horizontal_roll_x_avg = roll_x_avg / count;
-                        horizontal_pitch_y_avg = pitch_y_avg / count;
-                        horizontal_yaw_z_avg = yaw_z_avg / count;
-                        horizontal_accuracy_avg = accuracy_avg / count;
                     }
                 }.start();
             }
@@ -366,41 +432,18 @@ public class MainActivity extends AppCompatActivity {
         verticalCalibrateButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view){
+                long timestamp = System.currentTimeMillis();
+                String row = timestamp + ",STARTED VERTICAL CALIBRATION";
+                notesQueue.offer(row);
+                verticalCalibrateButton.setEnabled(false);
                 new CountDownTimer(3000, 1000) {
-                    float x_avg = 0;
-                    float y_avg = 0;
-                    float z_avg = 0;
-                    float w_avg = 0;
-                    double roll_x_avg = 0;
-                    double pitch_y_avg = 0;
-                    double yaw_z_avg = 0;
-                    float accuracy_avg = 0;
-                    float count = 0;
                     public void onTick(long millisUntilFinished) {
-                        generalIndicator.setText("seconds remaining: " + millisUntilFinished / 1000);
-                        x_avg += x;
-                        y_avg += y;
-                        z_avg += z;
-                        w_avg += w;
-                        roll_x_avg += roll_x;
-                        pitch_y_avg += pitch_y;
-                        yaw_z_avg += yaw_z;
-                        accuracy_avg += accuracy;
-                        count += 1;
                     }
 
                     public void onFinish() {
-                        generalIndicator.setText("Done with Horizontal Calibration");
-                        startButton.setEnabled(true);
-                        verticalCalibrateButton.setEnabled(false);
-                        vertical_x_avg = x_avg / count;
-                        vertical_y_avg = y_avg / count;
-                        vertical_z_avg = z_avg / count;
-                        vertical_w_avg = w_avg / count;
-                        vertical_roll_x_avg = roll_x_avg / count;
-                        vertical_pitch_y_avg = pitch_y_avg / count;
-                        vertical_yaw_z_avg = yaw_z_avg / count;
-                        vertical_accuracy_avg = accuracy_avg / count;
+                        long timestamp = System.currentTimeMillis();
+                        String row = timestamp + ",ENDED VERTICAL CALIBRATION";
+                        notesQueue.offer(row);
                     }
                 }.start();
             }
@@ -409,92 +452,77 @@ public class MainActivity extends AppCompatActivity {
         startButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view){
-                noteColumnValue = "-";
-                data = new ArrayList<>();
                 Date currentTime = new Date();
                 startTimestamp = new SimpleDateFormat(
                         "yyyy-MM-dd_hh-mm-ss").format(currentTime);
+
                 startButton.setEnabled(false);
                 stopButton.setEnabled(true);
+                horizontalCalibrateButton.setEnabled(true);
                 logNoteButton.setEnabled(true);
-                //saveButton.setEnabled(false);
 
-                // Log once per second.
-                countdownTimer = new CountDownTimer(1000 * 60 * 60, 1000) {
-                    public void onTick(long millisUntilFinished) {
-                        logDataRow();
-                    }
+                String locationFilename = getExternalFilesDir(null) + "/" + startTimestamp + "_location.csv";
+                String notesFilename = getExternalFilesDir(null) + "/" + startTimestamp + "_notes.csv";
+                locationOutputFile = new File(locationFilename);
+                notesOutputFile = new File(notesFilename);
+                lightSensorLogger.register(startTimestamp);
+                rotationSensorLogger.register(startTimestamp);
+                accelerometerLogger.register(startTimestamp);
+                gyroscopeLogger.register(startTimestamp);
+                magnetometerLogger.register(startTimestamp);
+                restartCounter++;
 
-                    public void onFinish() {
-                    }
-                };
-                countdownTimer.start();
+                // For logging to location file
+                if (!isFileWritingThreadRunning(notesFileWritingThread)) {
+                    notesFileWritingThread = startFileWritingThread(
+                            notesFileWritingThread, notesQueue,
+                            notesOutputFile, "notesThread" + restartCounter);
+                }
 
-                // Start logging every time a new light sensor reading is read.
-                logging = true;
+                // For logging notes file.
+                if (!isFileWritingThreadRunning(locationFileWritingThread)) {
+                    locationFileWritingThread = startFileWritingThread(
+                            locationFileWritingThread, locationQueue,
+                            locationOutputFile, "locationThread" + restartCounter);
+                }
             }
         });
+
         stopButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view){
-                logging = false;
-                countdownTimer.cancel();
-                writeToCsv(data, startTimestamp);
                 startButton.setEnabled(true);
                 stopButton.setEnabled(false);
+                horizontalCalibrateButton.setEnabled(false);
+                verticalCalibrateButton.setEnabled(false);
                 logNoteButton.setEnabled(false);
-                //saveButton.setEnabled(true);
+
+                locationFileWritingThread = stopFileWritingThread(locationFileWritingThread);
+                locationQueue.clear(); // Clear the data queue
+                notesFileWritingThread = stopFileWritingThread(notesFileWritingThread);
+                notesQueue.clear(); // Clear the data queue
+
+                lightSensorLogger.close();
+                rotationSensorLogger.close();
+                accelerometerLogger.close();
+                gyroscopeLogger.close();
+                magnetometerLogger.close();
+
             }
         });
         logNoteButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view){
-                noteColumnValue = noteInput.getText().toString();
+                //noteColumnValue = noteInput.getText().toString();
+                String noteValue = noteInput.getText().toString();
+                long timestamp = System.currentTimeMillis();
+                String row = timestamp + "," + noteValue;
+                // only offer to queue if start button has been pressed.
+                if (notesFileWritingThread != null) {
+                    notesQueue.offer(row);
+                }
             }
         });
-
-
-        //getLocation();
-
-        SensorManager mySensorManager = (SensorManager) getSystemService(SENSOR_SERVICE);
-
-        rotationSensor = mySensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR);
-        if (rotationSensor != null) {
-            textview.setText("Sensor.TYPE_ROTATION_VECTOR Available");
-            mySensorManager.registerListener(
-                    rotationSensorListener,
-                    rotationSensor,
-                    SensorManager.SENSOR_DELAY_NORMAL);
-
-        } else {
-            textview.setText("Sensor.TYPE_ROTATION_VECTOR NOT Available");
-        }
-
-        Sensor lightSensor = mySensorManager.getDefaultSensor(Sensor.TYPE_LIGHT);
-        if (lightSensor != null) {
-            textview.setText("Sensor.TYPE_LIGHT Available");
-            mySensorManager.registerListener(
-                    lightSensorListener,
-                    lightSensor,
-                    SensorManager.SENSOR_DELAY_NORMAL);
-
-        } else {
-            textview.setText("Sensor.TYPE_LIGHT NOT Available");
-        }
-        /*
-        accelerometer = mySensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
-        if (accelerometer != null) {
-            textview.setText("Sensor.TYPE_ACCELEROMETER Available");
-            mySensorManager.registerListener(
-                    accelerometerListener,
-                    accelerometer,
-                    SensorManager.SENSOR_DELAY_NORMAL);
-
-        } else {
-            textview.setText("Sensor.TYPE_ACCELEROMETER NOT Available");
-        }
-        */
-
     }
 
     @Override
@@ -503,192 +531,64 @@ public class MainActivity extends AppCompatActivity {
         startLocationUpdates();
     }
 
-    private final SensorEventListener lightSensorListener
-            = new SensorEventListener() {
-
-        @Override
-        public void onAccuracyChanged(Sensor sensor, int accuracy) {
-            // TODO Auto-generated method stub
-
-        }
-
-        @Override
-        public void onSensorChanged(SensorEvent event) {
-            if (event.sensor.getType() == Sensor.TYPE_LIGHT) {
-                textview.setText("LIGHT: " + event.values[0]);
-                long timeInMillis = (new Date()).getTime()
-                        + (event.timestamp - System.nanoTime()) / 1000000L;
-                lightSensorValue = event.values[0];
-                if (logging) {
-                    //logDataRow();
-                }
-            }
-        }
-
-    };
-
-    private final SensorEventListener accelerometerListener
-            = new SensorEventListener() {
-
-        @Override
-        public void onAccuracyChanged(Sensor sensor, int accuracy) {
-            // TODO Auto-generated method stub
-
-        }
-
-        @Override
-        public void onSensorChanged(SensorEvent event) {
-            if (event.sensor.getType() == Sensor.TYPE_ACCELEROMETER) {
-                accelReading = event.values[0] + "," +  event.values[1] + "," +  event.values[2];
-                //generalIndicator.setText(accelReading);
-            }
-        }
-
-    };
-
-    private double[] quaternionToEuler(float x, float y, float z, float w) {
-        double t0 = 2.0 * ((w * x) + (y * z));
-        double t1 = 1.0 - (2.0 * ((x * x) + (y * y)));
-        double roll_x = Math.atan2(t0, t1);
-
-        double t2 = 2.0 * ((w * y) - (z * x));
-        if (t2 > 1) {
-            t2 = 1;
-        }
-        if (t2 < -1) {
-            t2 = -1;
-        }
-        double pitch_y = Math.asin(t2);
-
-        double t3 = 2.0 * ((w * z) + (x * y));
-        double t4 = 1.0 - (2.0 * ((y * y) + (z * z)));
-        double yaw_z = Math.atan2(t3, t4);
-
-        double[] q = new double[3];
-        q[0] = roll_x * (180 / Math.PI);
-        q[1] = pitch_y * (180 / Math.PI);
-        q[2] = yaw_z * (180 / Math.PI);
-        return q;
-    }
-
-    private final SensorEventListener rotationSensorListener
-            = new SensorEventListener() {
-
-        @Override
-        public void onAccuracyChanged(Sensor sensor, int accuracy) {
-            // TODO Auto-generated method stub
-
-        }
-
-        @Override
-        public void onSensorChanged(SensorEvent event) {
-            if (event.sensor.getType() == Sensor.TYPE_ROTATION_VECTOR) {
-                //rotationIndicator.setText("Rotation vector: " + event.values[0]);
-                x = event.values[0];
-                y = event.values[1];
-                z = event.values[2];
-                w = event.values[3];
-                accuracy = event.values[3]; // accuracy estimate in radians
-                double[] angles = quaternionToEuler(x, y, z, w);
-                roll_x = angles[0];
-                pitch_y = angles[1];
-                yaw_z = angles[2];
-
-                double roll_x_norm = roll_x - horizontal_roll_x_avg;
-                double pitch_y_norm = pitch_y - horizontal_pitch_y_avg;
-                double yaw_z_norm = yaw_z - horizontal_yaw_z_avg;
-
-                rotationIndicator.setText("Rotation vector: " + roll_x_norm);
-                rotationData = roll_x_norm + "," + pitch_y_norm + "," + yaw_z_norm + "," + accuracy;
-                //Log.i("rotation", "X: " + roll_x_norm + " Y: " + pitch_y_norm + " Z: " + yaw_z_norm + " accuracy: " + accuracy);
-                /*
-                float x_normalized = x - horizontal_x_avg;
-                float y_normalized = y - horizontal_y_avg;
-                float z_normalized = z - horizontal_z_avg;
-                float w_normalized = w - horizontal_w_avg;
-                rotationData = x_normalized + "," + y_normalized + "," + z_normalized + "," + w_normalized + "," + accuracy;
-                Log.i("rotation", "X: " + x_normalized + " Y: " + y_normalized + " Z: " + z_normalized + " w: " + w_normalized + " accuracy: " + accuracy);
-                */
-
-
-            }
-        }
-
-    };
-
-
-    private void writeToCsv(ArrayList<String> data, String starttime) {
-        File file = new File(getExternalFilesDir(null), "file.csv");
-        Log.i("path", "" + file.getParent());
-        // Make application data directory if it is not there yet.
-        File folder = new File(file.getParent());
-        boolean success = true;
-        if (!folder.exists()) {
-            success = folder.mkdirs();
-        }
-        if (!success) {
-            Log.i(
-                    "Uh oh...",
-                    "Could not create folder in local storage. Please check app permissions.");
-        // Otherwise write to it.
-        } else {
-            try {
-                File out = new File(getExternalFilesDir(null) + "/" + starttime + ".csv");
-                String dir = out.getParent();
-                Log.i("writing csv", dir);
-                FileWriter writer = new FileWriter(out, false);
-                for (int i = 0; i < data.size(); i++) {
-                    writer.append("" + data.get(i) + ",");
-                }
-                writer.flush();
-                writer.close();
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
+    private void writeLineToFile(String line, File outputFile) {
+        try (BufferedWriter bw = new BufferedWriter(new FileWriter(outputFile, true))) {
+            bw.write(line);
+            bw.newLine();
+        } catch (IOException e) {
+            // Handle IOException
         }
     }
 
-    /*
-    private String getLocation() {
+    private synchronized boolean isFileWritingThreadRunning(Thread fileWritingThread) {
+        return fileWritingThread != null && fileWritingThread.isAlive();
+    }
+
+    // Thread for writing bluetooth data only.
+    private synchronized Thread startFileWritingThread(Thread thread,
+                                                       ConcurrentLinkedQueue<String> queue,
+                                                       File outputFile,
+                                                       String threadName) {
+        // if thread is already running just return it.
+        if (isFileWritingThreadRunning(thread)) {
+            return thread;
+            //return; // The thread is already running
+        }
+        keepRunning = true;
+
+        thread = new Thread(() -> {
+            while (keepRunning) {
+                while (!queue.isEmpty()) {
+                    String polledValue = queue.poll();
+                    writeLineToFile(polledValue, outputFile);
+                }
+                // Optional: Sleep a bit if queue is empty to reduce CPU usage
+                try {
+                    Thread.sleep(10); // Sleep for 10 milliseconds
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        }, threadName);
+        thread.start();
+        return thread;
+    }
+
+    private synchronized Thread stopFileWritingThread(Thread thread) {
+        if (!isFileWritingThreadRunning(thread)) {
+            return null; // The thread is not running
+        }
+        keepRunning = false;
+        thread.interrupt();
         try {
-            // Check the permissions before getting location.
-            if (ActivityCompat.checkSelfPermission(this,
-                    Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED
-                    && ActivityCompat.checkSelfPermission(this,
-                    Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED
-                    && ActivityCompat.checkSelfPermission(this,
-                    Manifest.permission.ACCESS_NETWORK_STATE) != PackageManager.PERMISSION_GRANTED) {
-                return "";
-            }
-
-            //gps_loc = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER);
-            //network_loc = locationManager.getLastKnownLocation(LocationManager.NETWORK_PROVIDER);
-
-            //locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 0, 0, this);
-            //locationManager.requestLocationUpdates(LocationManager.FUSED_PROVIDER, );
-
-
-        } catch (Exception e) {
-            e.printStackTrace();
+            thread.join(); // Wait for the thread to finish
+            Log.i("STOP THREAD", "thread joined.");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            Log.i("STOP THREAD", "Could not join thread.");
         }
-
-        if (gps_loc != null) {
-            final_loc = gps_loc;
-            latitude = final_loc.getLatitude();
-            longitude = final_loc.getLongitude();
-        }
-        else if (network_loc != null) {
-            final_loc = network_loc;
-            latitude = final_loc.getLatitude();
-            longitude = final_loc.getLongitude();
-        }
-        else {
-            latitude = 0.0;
-            longitude = 0.0;
-        }
-
-        locationIndicator.setText(latitude + ", " + longitude);
-        return latitude + "," + longitude;
+        // only necessary if returns void using global thread variable.
+        // thread = null; // Clear the thread reference
+        return null;
     }
-    */
 }
