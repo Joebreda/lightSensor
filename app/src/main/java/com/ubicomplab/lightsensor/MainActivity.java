@@ -28,7 +28,6 @@ import com.google.android.gms.common.api.GoogleApiClient;
 import com.google.android.gms.common.api.ResolvableApiException;
 import com.google.android.gms.location.FusedLocationProviderClient;
 import com.google.android.gms.location.LocationRequest;
-//import android.location.LocationRequest;
 import android.os.Bundle;
 import android.os.CountDownTimer;
 import android.os.Handler;
