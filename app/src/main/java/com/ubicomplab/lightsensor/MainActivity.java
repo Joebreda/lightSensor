@@ -1,30 +1,25 @@
 package com.ubicomplab.lightsensor;
 
-import static com.google.android.gms.location.LocationServices.getFusedLocationProviderClient;
-
 import androidx.annotation.NonNull;
-import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.PendingIntent;
+import android.content.BroadcastReceiver;
 import android.content.Context;
-import android.content.IntentSender;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.hardware.Sensor;
 import android.hardware.SensorEvent;
 import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
-import android.location.Address;
-import android.location.Criteria;
-import android.location.Geocoder;
+import android.hardware.usb.UsbDevice;
+import android.hardware.usb.UsbDeviceConnection;
+import android.hardware.usb.UsbManager;
 import android.location.Location;
-import android.location.LocationManager;
-
-import com.google.android.gms.common.ConnectionResult;
-import com.google.android.gms.common.GooglePlayServicesUtil;
-import com.google.android.gms.common.api.GoogleApiClient;
 import com.google.android.gms.common.api.ResolvableApiException;
 import com.google.android.gms.location.FusedLocationProviderClient;
 import com.google.android.gms.location.LocationRequest;
@@ -56,15 +51,26 @@ import java.io.BufferedWriter;
 import java.io.File;
 import java.io.FileWriter;
 import java.io.IOException;
-import java.lang.reflect.Array;
+import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
-import java.util.ArrayList;
 import java.util.Date;
-import java.util.List;
+import java.util.HashMap;
 import java.util.Locale;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
+// requires 'https://jitpack.io' in settings.gradle.
+import com.felhr.usbserial.UsbSerialDevice;
+import com.felhr.usbserial.UsbSerialInterface;
+
 public class MainActivity extends AppCompatActivity {
+    // Variables for serial connection.
+    public static final String ACTION_USB_PERMISSION = "com.ubicomplab.lightsensor.USB_PERMISSION";
+    static UsbSerialDevice serialPort;
+    UsbDeviceConnection connection;
+    UsbDevice usbDevice;
+    //static Button serialLoggingButton;
+    boolean serialLogging;
+
     double longitude;
     double latitude;
     TextView textview;
@@ -83,19 +89,14 @@ public class MainActivity extends AppCompatActivity {
     private Activity mainActivity;
 
     private SensorManager mySensorManager;
-
     private Sensor lightSensor;
     private SensorLogger lightSensorLogger;
-
     private Sensor rotationSensor;
     private SensorLogger rotationSensorLogger;
-
     private Sensor accelerometer;
     private SensorLogger accelerometerLogger;
-
     private Sensor gyroscope;
     private SensorLogger gyroscopeLogger;
-
     private Sensor magnetometer;
     private SensorLogger magnetometerLogger;
 
@@ -106,9 +107,13 @@ public class MainActivity extends AppCompatActivity {
     // For logging the location and notes:
     private ConcurrentLinkedQueue<String> locationQueue = new ConcurrentLinkedQueue<>();
     private ConcurrentLinkedQueue<String> notesQueue = new ConcurrentLinkedQueue<>();
+    private ConcurrentLinkedQueue<String> externalLightSensorDataQueueSerial = new ConcurrentLinkedQueue<>();
+
     private Thread locationFileWritingThread = null;
     private Thread notesFileWritingThread = null;
+    private Thread externalLightSensorFileWritingThread = null;
     private File locationOutputFile;
+    private File externalLightSensorOutputFile;
     private File notesOutputFile;
     private int restartCounter;
 
@@ -174,6 +179,7 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    // Single generalized class to handle reading from a sensor and writing to a file.
     public class SensorLogger {
         private SensorManager sensorManager;
         private Sensor sensor;
@@ -204,8 +210,14 @@ public class MainActivity extends AppCompatActivity {
                 }
                 // Initialize your sensor event listener
                 this.sensorEventListener = new SensorEventWriter(this.bufferedWriter);
-                this.sensorManager.registerListener(this.sensorEventListener,
-                        this.sensor, this.sensorManager.SENSOR_DELAY_NORMAL, sensorHandler);
+                if (sensorType.equals("light")) {
+                    this.sensorManager.registerListener(this.sensorEventListener,
+                            this.sensor, SensorManager.SENSOR_DELAY_FASTEST, sensorHandler);
+                } else {
+                    this.sensorManager.registerListener(this.sensorEventListener,
+                            this.sensor, SensorManager.SENSOR_DELAY_NORMAL, sensorHandler);
+                }
+
             } else {
                 Log.i("SENSOR!", sensorType + " NOT Available");
             }
@@ -345,9 +357,31 @@ public class MainActivity extends AppCompatActivity {
     }
 
     @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        unregisterReceiver(usbPermissionReceiver);
+    }
+
+    @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
+
+        // Write logs to log file
+        // TODO Uncomment if you need to debug serial connection code.
+        /*
+        try {
+            // Define the log file
+            String filename = "zzz_logcat_" + System.currentTimeMillis() + ".txt";
+            File outputFile = new File(getExternalFilesDir(null), filename);
+
+            // Start the logcat process
+            Process process = Runtime.getRuntime().exec("logcat -f " + outputFile.getAbsolutePath());
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+        */
+
         ActivityCompat.requestPermissions(this, permissions, REQUEST_PERMISSIONS);
         mainActivity = this;
         mFusedLocationClient = LocationServices.getFusedLocationProviderClient(this);
@@ -360,7 +394,10 @@ public class MainActivity extends AppCompatActivity {
         logging = false;
         Log.i("date", "" + new Date().getTime());
 
-        // Initialize the IMU sensors.
+        IntentFilter filter = new IntentFilter(ACTION_USB_PERMISSION);
+        registerReceiver(usbPermissionReceiver, filter);
+
+        // Initialize all sensors for logging.
         mySensorManager = (SensorManager) getSystemService(SENSOR_SERVICE);
         lightSensor = mySensorManager.getDefaultSensor(Sensor.TYPE_LIGHT);
         lightSensorLogger = new SensorLogger(
@@ -451,18 +488,28 @@ public class MainActivity extends AppCompatActivity {
         startButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view){
+                // Clear buffer immediately to throw away any content that may have been stored prior to start.
+                externalLightSensorDataQueueSerial.clear();
+
                 Date currentTime = new Date();
                 startTimestamp = new SimpleDateFormat(
                         "yyyy-MM-dd_hh-mm-ss").format(currentTime);
+                String noteValue = noteInput.getText().toString();
+                startTimestamp = noteValue + "_" + startTimestamp;
 
                 startButton.setEnabled(false);
                 stopButton.setEnabled(true);
                 horizontalCalibrateButton.setEnabled(true);
                 logNoteButton.setEnabled(true);
 
+                serialLogging = true;
+                Log.i("Start", "start button was pressed!");
+
                 String locationFilename = getExternalFilesDir(null) + "/" + startTimestamp + "_location.csv";
                 String notesFilename = getExternalFilesDir(null) + "/" + startTimestamp + "_notes.csv";
+                String externalLightSensorFilename = getExternalFilesDir(null) + "/" + startTimestamp + "_external_light_sensor.csv";
                 locationOutputFile = new File(locationFilename);
+                externalLightSensorOutputFile = new File(externalLightSensorFilename);
                 notesOutputFile = new File(notesFilename);
                 lightSensorLogger.register(startTimestamp);
                 rotationSensorLogger.register(startTimestamp);
@@ -484,6 +531,13 @@ public class MainActivity extends AppCompatActivity {
                             locationFileWritingThread, locationQueue,
                             locationOutputFile, "locationThread" + restartCounter);
                 }
+
+                // For logging any data from an embedded system connected over serial.
+                if (!isFileWritingThreadRunning(externalLightSensorFileWritingThread)) {
+                    externalLightSensorFileWritingThread = startFileWritingThread(
+                            externalLightSensorFileWritingThread, externalLightSensorDataQueueSerial,
+                            externalLightSensorOutputFile, "externalLightSensorThread" + restartCounter);
+                }
             }
         });
 
@@ -495,11 +549,14 @@ public class MainActivity extends AppCompatActivity {
                 horizontalCalibrateButton.setEnabled(false);
                 verticalCalibrateButton.setEnabled(false);
                 logNoteButton.setEnabled(false);
+                serialLogging = false;
 
                 locationFileWritingThread = stopFileWritingThread(locationFileWritingThread);
                 locationQueue.clear(); // Clear the data queue
                 notesFileWritingThread = stopFileWritingThread(notesFileWritingThread);
                 notesQueue.clear(); // Clear the data queue
+                externalLightSensorFileWritingThread = stopFileWritingThread(externalLightSensorFileWritingThread);
+                externalLightSensorDataQueueSerial.clear();
 
                 lightSensorLogger.close();
                 rotationSensorLogger.close();
@@ -554,11 +611,13 @@ public class MainActivity extends AppCompatActivity {
             //return; // The thread is already running
         }
         keepRunning = true;
+        Log.i("STARTING THREAD" , threadName);
 
         thread = new Thread(() -> {
             while (keepRunning) {
                 while (!queue.isEmpty()) {
                     String polledValue = queue.poll();
+                    //Log.i("INSIDE THREAD!", Thread.currentThread().getName() + " Writing: " + polledValue);
                     writeLineToFile(polledValue, outputFile);
                 }
                 // Optional: Sleep a bit if queue is empty to reduce CPU usage
@@ -589,5 +648,157 @@ public class MainActivity extends AppCompatActivity {
         // only necessary if returns void using global thread variable.
         // thread = null; // Clear the thread reference
         return null;
+    }
+
+
+    // Receiver for a connected USB serial device.
+    public static class UsbSerialReceiver extends BroadcastReceiver {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            String action = intent.getAction();
+            if ("android.hardware.usb.action.USB_DEVICE_ATTACHED".equals(action)) {
+                // Routine executed when attaching a USB device.
+                UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+                if (device != null) {
+                    // call method to set up device communication
+                    UsbManager usbManager = (UsbManager) context.getSystemService(Context.USB_SERVICE);
+                    HashMap<String, UsbDevice> deviceList = usbManager.getDeviceList();
+                    for (UsbDevice d : deviceList.values()) {
+                        int vendorId = d.getVendorId();
+                        int productId = d.getProductId();
+                        // TODO if you do not add these to the device_filter.xml then you cannot receive anything!
+                        Log.i("USB_DEVICE_INFO", "VID: " + vendorId + " PID: " + productId);
+                    }
+                    PendingIntent permissionIntent = PendingIntent.getBroadcast(context, 0, new Intent(ACTION_USB_PERMISSION), PendingIntent.FLAG_MUTABLE);
+                    usbManager.requestPermission(device, permissionIntent);
+                }
+            } else if ("android.hardware.usb.action.USB_DEVICE_DETACHED".equals(action)) {
+                // Routine executed when detaching the USB device.
+                UsbDevice detachedDevice = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+                if (serialPort != null) {
+                    serialPort.close();
+                }
+                // If logging was still left on before USB unplugged, stop it by programmatically pressing the button.
+                //serialLoggingButton.setEnabled(false);
+            }
+        }
+    }
+
+    UsbSerialInterface.UsbReadCallback mCallback = new UsbSerialInterface.UsbReadCallback() {
+        @Override
+        public void onReceivedData(byte[] arg0) {
+            // Convert bytes to string
+            if (serialLogging) {
+
+                String data = new String(arg0, StandardCharsets.UTF_8);
+                Log.i("SerialData", data);
+
+                String[] parts = data.trim().split("\\s+"); // Split the data by whitespace
+
+                int sensorId;
+
+                try {
+                    sensorId = Integer.parseInt(parts[0]);
+                } catch (NumberFormatException e) {
+                    // Handle invalid number format
+                    return;
+                }
+
+                // Only
+                Log.i("parts length is: ", "" + parts.length);
+                if (parts.length >= 5 && sensorId == 1) {
+                    Log.i("Writing parts with lux of: ", "" + parts[4]);
+                    long timestamp = System.currentTimeMillis();
+                    // Replace the sensor ID with a timestamp and create a CSV row.
+                    parts[0] = timestamp + "";
+                    String row = String.join(", ", parts);
+                    Log.i("SerialRow", row);
+                    externalLightSensorDataQueueSerial.offer(row);
+                    // Update UI with external light sensor reading.
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            // Update UI with data
+                            rotationIndicator.setText(parts[4] + "");
+                        }
+                    });
+
+                } else {
+                    // not a sensor reading.
+                    Log.i("Serial error", "Serial received something unexpected! Check serial processing code or how data is sent from embedded system.");
+                }
+            }
+        }
+    };
+
+
+
+    BroadcastReceiver usbPermissionReceiver = new BroadcastReceiver() {
+        public void onReceive(Context context, Intent intent) {
+            String action = intent.getAction();
+            if (ACTION_USB_PERMISSION.equals(action)) {
+                synchronized (this) {
+                    UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+
+                    if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
+                        if(device != null){
+                            // Permission granted - setup the device
+                            Log.i("SERIAL", "Permission granted for device " + device);
+                            UsbManager usbManager = (UsbManager) context.getSystemService(Context.USB_SERVICE);
+                            connection = usbManager.openDevice(device);
+                            if (connection != null) {
+                                serialPort = UsbSerialDevice.createUsbSerialDevice(device, connection);
+                                if (serialPort != null) {
+                                    if (serialPort.open()) {
+                                        // Set Serial Connection Parameters.
+                                        serialPort.setBaudRate(115200);
+                                        serialPort.setDataBits(UsbSerialInterface.DATA_BITS_8);
+                                        serialPort.setStopBits(UsbSerialInterface.STOP_BITS_1);
+                                        serialPort.setParity(UsbSerialInterface.PARITY_NONE);
+                                        serialPort.setFlowControl(UsbSerialInterface.FLOW_CONTROL_OFF);
+                                        serialPort.read(mCallback);
+                                        //serialLoggingButton.setEnabled(true);
+                                    }
+                                }
+                            } else {
+                                Log.i("SERIAL", "SERIAL CONNECTION IS NULL...");
+                            }
+                        }
+                    } else {
+                        // Permission denied
+                        Log.i("SERIAL!", "permission defied for device: " + device);
+                    }
+                }
+            }
+        }
+    };
+
+    private void stopSerialConnection() {
+        if (serialPort != null && serialPort.isOpen()) {
+            serialPort.close();
+            serialPort = null;
+            Log.i("SERIAL", "Serial connection stopped");
+        }
+    }
+
+    private void startSerialConnection(UsbDevice device) {
+        UsbManager usbManager = (UsbManager) getSystemService(Context.USB_SERVICE);
+        UsbDeviceConnection connection = usbManager.openDevice(device);
+        if (connection != null) {
+            serialPort = UsbSerialDevice.createUsbSerialDevice(device, connection);
+            if (serialPort != null && serialPort.open()) {
+                serialPort.setBaudRate(115200);
+                serialPort.setDataBits(UsbSerialInterface.DATA_BITS_8);
+                serialPort.setStopBits(UsbSerialInterface.STOP_BITS_1);
+                serialPort.setParity(UsbSerialInterface.PARITY_NONE);
+                serialPort.setFlowControl(UsbSerialInterface.FLOW_CONTROL_OFF);
+                serialPort.read(mCallback);
+                Log.i("SERIAL", "Serial connection started");
+            } else {
+                Log.i("SERIAL", "Failed to open serial port");
+            }
+        } else {
+            Log.i("SERIAL", "Failed to open USB device connection");
+        }
     }
 }

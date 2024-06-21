@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+<resources>
+    <usb-device />
+</resources>
+-->
+
+<resources>
+    <!-- XIAO! -->
+    <!-- <usb-device vendor-id="10374" product-id="32837" />--> <!-- 0x6001: FT232R -->
+    <!-- Adafruit ESP32-S3 QTpy no PSRAM! -->
+    <usb-device vendor-id="12346" product-id="4097" />
+
+</resources>

@@ -4,11 +4,11 @@ plugins {
 
 android {
     namespace 'com.ubicomplab.lightsensor'
-    compileSdk 32
+    compileSdk 33
 
     defaultConfig {
         applicationId "com.ubicomplab.lightsensor"
-        minSdk 30
+        minSdk 28
         targetSdk 32
         versionCode 1
         versionName "1.0"
@@ -37,4 +37,5 @@ dependencies {
     androidTestImplementation 'androidx.test.ext:junit:1.1.4'
     androidTestImplementation 'androidx.test.espresso:espresso-core:3.5.0'
     implementation 'com.google.android.gms:play-services-location:21.0.1'
+    implementation 'com.github.felHR85:UsbSerial:6.1.0'
 }
