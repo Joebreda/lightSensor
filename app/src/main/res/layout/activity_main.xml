@@ -44,29 +44,25 @@
         android:id="@+id/start"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginStart="160dp"
-        android:layout_marginTop="8dp"
-        android:layout_marginEnd="157dp"
-        android:layout_marginBottom="16dp"
+        android:layout_marginStart="16dp"
+        android:layout_marginTop="14dp"
+        android:layout_marginBottom="9dp"
         android:text="start"
         app:layout_constraintBottom_toTopOf="@+id/stop"
-        app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintHorizontal_bias="0.0"
+        app:layout_constraintEnd_toStartOf="@+id/vertical_calibrate"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toBottomOf="@+id/vertical_calibrate" />
+        app:layout_constraintTop_toBottomOf="@+id/textureViewFront" />
 
     <Button
         android:id="@+id/stop"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginStart="157dp"
-        android:layout_marginTop="8dp"
-        android:layout_marginEnd="160dp"
-        android:layout_marginBottom="16dp"
+        android:layout_marginStart="16dp"
+        android:layout_marginTop="9dp"
+        android:layout_marginBottom="150dp"
         android:text="stop"
-        app:layout_constraintBottom_toTopOf="@+id/indicator"
-        app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintHorizontal_bias="1.0"
+        app:layout_constraintBottom_toTopOf="@+id/plain_text_input"
+        app:layout_constraintEnd_toStartOf="@+id/horizontal_calibrate"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toBottomOf="@+id/start" />
 
@@ -88,29 +84,29 @@
         android:id="@+id/horizontal_calibrate"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginStart="96dp"
-        android:layout_marginTop="16dp"
-        android:layout_marginEnd="96dp"
-        android:layout_marginBottom="21dp"
-        android:text="horizontal calibrate"
-        app:layout_constraintBottom_toTopOf="@+id/vertical_calibrate"
+        android:layout_marginStart="157dp"
+        android:layout_marginTop="9dp"
+        android:layout_marginEnd="18dp"
+        android:layout_marginBottom="150dp"
+        android:text="H calibrate"
+        app:layout_constraintBottom_toTopOf="@+id/plain_text_input"
         app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toTopOf="parent" />
+        app:layout_constraintStart_toEndOf="@+id/stop"
+        app:layout_constraintTop_toBottomOf="@+id/vertical_calibrate" />
 
     <Button
         android:id="@+id/vertical_calibrate"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginStart="158dp"
-        android:layout_marginTop="8dp"
-        android:layout_marginEnd="159dp"
-        android:layout_marginBottom="39dp"
-        android:text="vertical calibrate"
-        app:layout_constraintBottom_toTopOf="@+id/start"
+        android:layout_marginStart="160dp"
+        android:layout_marginTop="14dp"
+        android:layout_marginEnd="16dp"
+        android:layout_marginBottom="9dp"
+        android:text="V calibrate"
+        app:layout_constraintBottom_toTopOf="@+id/horizontal_calibrate"
         app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toBottomOf="@+id/horizontal_calibrate" />
+        app:layout_constraintStart_toEndOf="@+id/start"
+        app:layout_constraintTop_toBottomOf="@+id/textureViewRear" />
 
     <TextView
         android:id="@+id/general_indicator"
@@ -138,5 +134,24 @@
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toBottomOf="@+id/rotation" />
+
+    <TextureView
+        android:id="@+id/textureViewFront"
+        android:layout_width="200dp"
+        android:layout_height="200dp"
+        android:layout_marginTop="12dp"
+        app:layout_constraintEnd_toStartOf="@+id/textureViewRear"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent" />
+
+    <TextureView
+        android:id="@+id/textureViewRear"
+        android:layout_width="200dp"
+        android:layout_height="200dp"
+        android:layout_marginStart="11dp"
+        android:layout_marginTop="12dp"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toEndOf="@+id/textureViewFront"
+        app:layout_constraintTop_toTopOf="parent" />
 
 </androidx.constraintlayout.widget.ConstraintLayout>

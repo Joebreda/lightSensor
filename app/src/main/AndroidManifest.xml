@@ -9,6 +9,7 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.CAMERA" />
 
     <uses-feature android:name="android.hardware.usb.host"/>
     <uses-permission android:name="android.permission.USB_PERMISSION"/>
@@ -25,6 +26,11 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.Lightsensor"
         tools:targetApi="31">
+        <service
+            android:name=".cameraService"
+            android:enabled="true"
+            android:exported="true"></service>
+
         <activity
             android:name=".MainActivity"
             android:exported="true">
@@ -39,7 +45,8 @@
                 android:value="" />
         </activity>
 
-        <receiver android:name="com.ubicomplab.lightsensor.MainActivity$UsbSerialReceiver"
+        <receiver
+            android:name=".MainActivity$UsbSerialReceiver"
             android:exported="true"
             tools:ignore="Instantiatable">
             <intent-filter>
@@ -50,7 +57,6 @@
                 android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
                 android:resource="@xml/device_filter" />
         </receiver>
-
     </application>
 
 </manifest>

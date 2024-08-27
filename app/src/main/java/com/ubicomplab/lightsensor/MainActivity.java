@@ -3,6 +3,7 @@ package com.ubicomplab.lightsensor;
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
+import androidx.core.content.ContextCompat;
 
 import android.Manifest;
 import android.app.Activity;
@@ -16,13 +17,25 @@ import android.hardware.Sensor;
 import android.hardware.SensorEvent;
 import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
+import android.hardware.camera2.CameraAccessException;
+import android.hardware.camera2.CameraCaptureSession;
+import android.hardware.camera2.CameraCharacteristics;
+import android.hardware.camera2.CameraDevice;
+import android.hardware.camera2.CameraManager;
+import android.hardware.camera2.CaptureRequest;
+import android.hardware.camera2.CaptureResult;
+import android.hardware.camera2.TotalCaptureResult;
+import android.hardware.camera2.params.StreamConfigurationMap;
 import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbDeviceConnection;
 import android.hardware.usb.UsbManager;
 import android.location.Location;
+
 import com.google.android.gms.common.api.ResolvableApiException;
 import com.google.android.gms.location.FusedLocationProviderClient;
 import com.google.android.gms.location.LocationRequest;
+
+import android.media.MediaRecorder;
 import android.os.Bundle;
 import android.os.CountDownTimer;
 import android.os.Handler;
@@ -30,6 +43,9 @@ import android.os.HandlerThread;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.util.Log;
+import android.util.Size;
+import android.view.Surface;
+import android.view.TextureView;
 import android.view.View;
 import android.widget.Button;
 import android.widget.EditText;
@@ -53,6 +69,8 @@ import java.io.FileWriter;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
+import java.time.LocalDateTime;
+import java.util.Arrays;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.Locale;
@@ -62,6 +80,17 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import com.felhr.usbserial.UsbSerialDevice;
 import com.felhr.usbserial.UsbSerialInterface;
 
+/*
+import dji.common.error.DJIError;
+import dji.common.gimbal.Attitude;
+import dji.common.gimbal.GimbalState;
+import dji.sdk.base.BaseComponent;
+import dji.sdk.base.BaseProduct;
+import dji.sdk.gimbal.Gimbal;
+import dji.sdk.sdkmanager.DJISDKInitEvent;
+import dji.sdk.sdkmanager.DJISDKManager;
+*/
+
 public class MainActivity extends AppCompatActivity {
     // Variables for serial connection.
     public static final String ACTION_USB_PERMISSION = "com.ubicomplab.lightsensor.USB_PERMISSION";
@@ -70,6 +99,21 @@ public class MainActivity extends AppCompatActivity {
     UsbDevice usbDevice;
     //static Button serialLoggingButton;
     boolean serialLogging;
+    Context packageContext;
+
+    // Camera variables
+    private static final int REQUEST_CAMERA_PERMISSION = 200;
+    private TextureView textureViewFront;
+    private TextureView textureViewRear;
+    private CameraDevice cameraDeviceFront;
+    private CameraDevice cameraDeviceRear;
+    private MediaRecorder mediaRecorderFront;
+    private MediaRecorder mediaRecorderRear;
+    private String cameraIdFront;
+    private String cameraIdRear;
+    private CameraCaptureSession cameraCaptureSessionFront;
+    private CameraCaptureSession cameraCaptureSessionRear;
+    private FileWriter metadataWriter;
 
     double longitude;
     double latitude;
@@ -124,7 +168,11 @@ public class MainActivity extends AppCompatActivity {
             Manifest.permission.ACCESS_COARSE_LOCATION,
             Manifest.permission.WRITE_EXTERNAL_STORAGE,
             Manifest.permission.READ_EXTERNAL_STORAGE,
-            Manifest.permission.ACCESS_NETWORK_STATE};
+            Manifest.permission.ACCESS_NETWORK_STATE,
+            Manifest.permission.CAMERA,
+            Manifest.permission.RECORD_AUDIO};
+
+    //private Gimbal gimbal;
 
     public class SensorEventWriter implements SensorEventListener {
         private BufferedWriter bufferedWriter;
@@ -171,8 +219,10 @@ public class MainActivity extends AppCompatActivity {
                 // Remove the last comma
                 dataString.deleteCharAt(dataString.length() - 1);
                 // Write to file and add a new line
-                bufferedWriter.write(dataString.toString());
-                bufferedWriter.newLine();
+                synchronized (bufferedWriter) {
+                    bufferedWriter.write(dataString.toString());
+                    bufferedWriter.newLine();
+                }
             } catch (IOException e) {
                 e.printStackTrace();
             }
@@ -233,7 +283,9 @@ public class MainActivity extends AppCompatActivity {
             // Close the BufferedWriter
             try {
                 if (this.bufferedWriter != null) {
-                    this.bufferedWriter.close();
+                    synchronized (bufferedWriter) {
+                        this.bufferedWriter.close();
+                    }
                     this.bufferedWriter = null;
                 }
             } catch (IOException e) {
@@ -338,7 +390,7 @@ public class MainActivity extends AppCompatActivity {
             mFusedLocationClient = LocationServices.getFusedLocationProviderClient(this);
             if (ActivityCompat.checkSelfPermission(this,
                     Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED && ActivityCompat.checkSelfPermission(
-                            this, Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+                    this, Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
                 // TODO: Consider calling
                 //    ActivityCompat#requestPermissions
                 // here to request the missing permissions, and then overriding
@@ -360,12 +412,121 @@ public class MainActivity extends AppCompatActivity {
     protected void onDestroy() {
         super.onDestroy();
         unregisterReceiver(usbPermissionReceiver);
+
+        try {
+            if (metadataWriter != null) {
+                metadataWriter.close();
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
     }
+
+    private void startCameraService() {
+        Intent intent = new Intent(this, cameraService.class);
+        intent.putExtra("startTime", startTimestamp);
+        startService(intent);
+    }
+
+    private void stopCameraService() {
+        Intent intent = new Intent(this, cameraService.class);
+        stopService(intent);
+    }
+    /*
+    private void initializeGimbal() {
+        gimbal = DJISDKManager.getInstance().getProduct().getGimbal();
+        if (gimbal != null) {
+            gimbal.setStateCallback(new GimbalState.Callback() {
+                @Override
+                public void onUpdate(@NonNull GimbalState gimbalState) {
+                    // Get the gimbal attitude
+                    Attitude attitude = gimbalState.getAttitudeInDegrees();
+
+                    float pitch = attitude.getPitch();
+                    float roll = attitude.getRoll();
+                    float yaw = attitude.getYaw();
+
+                    // Log the angles
+                    Log.d("GimbalAngles", "Pitch: " + pitch + " Roll: " + roll + " Yaw: " + yaw);
+                }
+            });
+        } else {
+            Log.e("DJI SDK", "Gimbal is null, unable to initialize");
+        }
+    }
+
+     */
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
+
+
+        /*
+        // Initialize the DJI SDK
+        DJISDKManager.getInstance().registerApp(this, new DJISDKManager.SDKManagerCallback() {
+            @Override
+            public void onRegister(DJIError djiError) {
+                Log.i("DJI REGISTER", djiError.toString() + "\n" + djiError.getDescription());
+                DJISDKManager.getInstance().startConnectionToProduct();
+
+            }
+
+            @Override
+            public void onProductDisconnect() {
+                Log.d("DJI SDK", "Product Disconnected");
+            }
+
+            @Override
+            public void onProductConnect(BaseProduct baseProduct) {
+                Log.d("DJI SDK", "Product Connected");
+                initializeGimbal();
+            }
+
+            @Override
+            public void onProductChanged(BaseProduct baseProduct) {
+
+            }
+
+            @Override
+            public void onComponentChange(BaseProduct.ComponentKey componentKey, BaseComponent baseComponent, BaseComponent baseComponent1) {
+
+            }
+
+            @Override
+            public void onInitProcess(DJISDKInitEvent djisdkInitEvent, int i) {
+
+            }
+
+            @Override
+            public void onDatabaseDownloadProgress(long l, long l1) {
+
+            }
+        });
+
+         */
+
+        textureViewFront = findViewById(R.id.textureViewFront);
+        textureViewRear = findViewById(R.id.textureViewRear);
+        packageContext = this;
+
+        /*
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
+                != PackageManager.PERMISSION_GRANTED ||
+                ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+                        != PackageManager.PERMISSION_GRANTED ||
+                ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                        != PackageManager.PERMISSION_GRANTED) {
+            ActivityCompat.requestPermissions(this, new String[]{
+                    Manifest.permission.CAMERA,
+                    Manifest.permission.RECORD_AUDIO,
+                    Manifest.permission.WRITE_EXTERNAL_STORAGE}, REQUEST_CAMERA_PERMISSION);
+        }
+
+        */
+
+
 
         // Write logs to log file
         // TODO Uncomment if you need to debug serial connection code.
@@ -400,6 +561,20 @@ public class MainActivity extends AppCompatActivity {
         // Initialize all sensors for logging.
         mySensorManager = (SensorManager) getSystemService(SENSOR_SERVICE);
         lightSensor = mySensorManager.getDefaultSensor(Sensor.TYPE_LIGHT);
+
+        if (lightSensor != null) {
+            StringBuilder sensorInfo = new StringBuilder();
+            sensorInfo.append("Sensor Name: ").append(lightSensor.getName()).append("\n");
+            sensorInfo.append("Vendor: ").append(lightSensor.getVendor()).append("\n");
+            sensorInfo.append("Version: ").append(lightSensor.getVersion()).append("\n");
+            sensorInfo.append("Maximum Range: ").append(lightSensor.getMaximumRange()).append("\n");
+            sensorInfo.append("Resolution: ").append(lightSensor.getResolution()).append("\n");
+            sensorInfo.append("Power: ").append(lightSensor.getPower()).append("\n");
+            sensorInfo.append("Min Delay: ").append(lightSensor.getMinDelay()).append(" µs\n");
+
+            // Log the sensor information
+            Log.i("SENSORINFO", sensorInfo.toString());
+        }
         lightSensorLogger = new SensorLogger(
                 mySensorManager, lightSensor, "light");
         rotationSensor = mySensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR);
@@ -435,7 +610,7 @@ public class MainActivity extends AppCompatActivity {
         // Get last known location as a baseline.
         if (ActivityCompat.checkSelfPermission(this,
                 Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED && ActivityCompat.checkSelfPermission(
-                        this, Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+                this, Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
             return;
         }
 
@@ -467,7 +642,7 @@ public class MainActivity extends AppCompatActivity {
         });
         verticalCalibrateButton.setOnClickListener(new View.OnClickListener() {
             @Override
-            public void onClick(View view){
+            public void onClick(View view) {
                 long timestamp = System.currentTimeMillis();
                 String row = timestamp + ",STARTED VERTICAL CALIBRATION";
                 notesQueue.offer(row);
@@ -487,7 +662,7 @@ public class MainActivity extends AppCompatActivity {
 
         startButton.setOnClickListener(new View.OnClickListener() {
             @Override
-            public void onClick(View view){
+            public void onClick(View view) {
                 // Clear buffer immediately to throw away any content that may have been stored prior to start.
                 externalLightSensorDataQueueSerial.clear();
 
@@ -495,12 +670,19 @@ public class MainActivity extends AppCompatActivity {
                 startTimestamp = new SimpleDateFormat(
                         "yyyy-MM-dd_hh-mm-ss").format(currentTime);
                 String noteValue = noteInput.getText().toString();
-                startTimestamp = noteValue + "_" + startTimestamp;
+                if (noteValue.length() >= 1) {
+                    noteValue = noteValue + "_";
+                }
+                startTimestamp = noteValue + startTimestamp;
 
                 startButton.setEnabled(false);
                 stopButton.setEnabled(true);
                 horizontalCalibrateButton.setEnabled(true);
                 logNoteButton.setEnabled(true);
+
+                startCameraRecording(startTimestamp);
+                //startCameraService();
+
 
                 serialLogging = true;
                 Log.i("Start", "start button was pressed!");
@@ -543,13 +725,16 @@ public class MainActivity extends AppCompatActivity {
 
         stopButton.setOnClickListener(new View.OnClickListener() {
             @Override
-            public void onClick(View view){
+            public void onClick(View view) {
                 startButton.setEnabled(true);
                 stopButton.setEnabled(false);
                 horizontalCalibrateButton.setEnabled(false);
                 verticalCalibrateButton.setEnabled(false);
                 logNoteButton.setEnabled(false);
                 serialLogging = false;
+
+                stopCameraRecording();
+                //stopCameraService();
 
                 locationFileWritingThread = stopFileWritingThread(locationFileWritingThread);
                 locationQueue.clear(); // Clear the data queue
@@ -568,7 +753,7 @@ public class MainActivity extends AppCompatActivity {
         });
         logNoteButton.setOnClickListener(new View.OnClickListener() {
             @Override
-            public void onClick(View view){
+            public void onClick(View view) {
                 //noteColumnValue = noteInput.getText().toString();
                 String noteValue = noteInput.getText().toString();
                 long timestamp = System.currentTimeMillis();
@@ -580,6 +765,260 @@ public class MainActivity extends AppCompatActivity {
             }
         });
     }
+
+    private void startCameraRecording(String startTimestamp) {
+        CameraManager manager = (CameraManager) getSystemService(CAMERA_SERVICE);
+        try {
+            cameraIdFront = manager.getCameraIdList()[0];
+            cameraIdRear = manager.getCameraIdList()[1];
+
+            CameraCharacteristics characteristicsFront = manager.getCameraCharacteristics(cameraIdFront);
+            CameraCharacteristics characteristicsRear = manager.getCameraCharacteristics(cameraIdRear);
+
+            StreamConfigurationMap mapFront = characteristicsFront.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+            StreamConfigurationMap mapRear = characteristicsRear.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+
+            Size videoSizeFront = mapFront.getOutputSizes(MediaRecorder.class)[0];
+            Size videoSizeRear = mapRear.getOutputSizes(MediaRecorder.class)[0];
+
+            setUpMediaRecorderFront(videoSizeFront, startTimestamp);
+            setUpMediaRecorderRear(videoSizeRear, startTimestamp);
+
+            metadataWriter = new FileWriter(new File(getExternalFilesDir(null), startTimestamp + "_camera_metadata.csv"));
+            metadataWriter.write("Timestamp,Camera,Exposure Time,ISO,Sensitivity\n");
+
+
+            if (ActivityCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+                // TODO: Consider calling
+                //    ActivityCompat#requestPermissions
+                // here to request the missing permissions, and then overriding
+                //   public void onRequestPermissionsResult(int requestCode, String[] permissions,
+                //                                          int[] grantResults)
+                // to handle the case where the user grants the permission. See the documentation
+                // for ActivityCompat#requestPermissions for more details.
+                return;
+            }
+            manager.openCamera(cameraIdFront, stateCallbackFront, null);
+            manager.openCamera(cameraIdRear, stateCallbackRear, null);
+
+        } catch (CameraAccessException | IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void stopCameraRecording() {
+        try {
+            // Stop and release the front media recorder
+            if (mediaRecorderFront != null) {
+                mediaRecorderFront.stop();
+                mediaRecorderFront.reset();
+                mediaRecorderFront.release();
+                mediaRecorderFront = null;
+            }
+
+            // Stop and release the rear media recorder
+            if (mediaRecorderRear != null) {
+                mediaRecorderRear.stop();
+                mediaRecorderRear.reset();
+                mediaRecorderRear.release();
+                mediaRecorderRear = null;
+            }
+
+            // Close the front camera device
+            if (cameraDeviceFront != null) {
+                cameraDeviceFront.close();
+                cameraDeviceFront = null;
+            }
+
+            // Close the rear camera device
+            if (cameraDeviceRear != null) {
+                cameraDeviceRear.close();
+                cameraDeviceRear = null;
+            }
+
+            // Close the metadata writer
+            if (metadataWriter != null) {
+                metadataWriter.close();
+                metadataWriter = null;
+            }
+
+        } catch (IOException e) {
+            e.printStackTrace();
+        } catch (IllegalStateException e) {
+            // Handle case where mediaRecorder.stop() is called in an invalid state
+            e.printStackTrace();
+        }
+    }
+
+
+    private void setUpMediaRecorderFront(Size videoSize, String startTimestamp) throws IOException {
+        mediaRecorderFront = new MediaRecorder();
+        mediaRecorderFront.setVideoSource(MediaRecorder.VideoSource.SURFACE);
+        mediaRecorderFront.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4);
+        String outputPath = new File(getExternalFilesDir(null), startTimestamp + "_front_camera.mp4").getAbsolutePath();
+        Log.i("video output path", outputPath);
+        mediaRecorderFront.setOutputFile(outputPath);
+        mediaRecorderFront.setVideoEncoder(MediaRecorder.VideoEncoder.H264);
+        mediaRecorderFront.setVideoSize(videoSize.getWidth(), videoSize.getHeight());
+        mediaRecorderFront.setVideoFrameRate(30);
+        mediaRecorderFront.prepare();
+
+    }
+
+    private void setUpMediaRecorderRear(Size videoSize, String startTimestamp) throws IOException {
+        mediaRecorderRear = new MediaRecorder();
+        mediaRecorderRear.setVideoSource(MediaRecorder.VideoSource.SURFACE);
+        mediaRecorderRear.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4);
+        String outputPath = new File(getExternalFilesDir(null), startTimestamp + "_rear_camera.mp4").getAbsolutePath();
+        Log.i("video output path", outputPath);
+        mediaRecorderRear.setOutputFile(outputPath);
+        mediaRecorderRear.setVideoEncoder(MediaRecorder.VideoEncoder.H264);
+        mediaRecorderRear.setVideoSize(videoSize.getWidth(), videoSize.getHeight());
+        mediaRecorderRear.setVideoFrameRate(30);
+        mediaRecorderRear.prepare();
+    }
+
+    private final CameraDevice.StateCallback stateCallbackFront = new CameraDevice.StateCallback() {
+        @Override
+        public void onOpened(@NonNull CameraDevice camera) {
+            cameraDeviceFront = camera;
+            createCameraPreviewSessionFront();
+        }
+
+        @Override
+        public void onDisconnected(@NonNull CameraDevice camera) {
+            camera.close();
+            cameraDeviceFront = null;
+        }
+
+        @Override
+        public void onError(@NonNull CameraDevice camera, int error) {
+            camera.close();
+            cameraDeviceFront = null;
+        }
+    };
+    private final CameraDevice.StateCallback stateCallbackRear = new CameraDevice.StateCallback() {
+        @Override
+        public void onOpened(@NonNull CameraDevice camera) {
+            cameraDeviceRear = camera;
+            createCameraPreviewSessionRear();
+        }
+
+        @Override
+        public void onDisconnected(@NonNull CameraDevice camera) {
+            camera.close();
+            cameraDeviceRear = null;
+        }
+
+        @Override
+        public void onError(@NonNull CameraDevice camera, int error) {
+            camera.close();
+            cameraDeviceRear = null;
+        }
+    };
+
+    private void createCameraPreviewSessionFront() {
+        try {
+            Surface textureSurface = new Surface(textureViewFront.getSurfaceTexture());
+            Surface recorderSurface = mediaRecorderFront.getSurface();
+
+            final CaptureRequest.Builder captureBuilder = cameraDeviceFront.createCaptureRequest(CameraDevice.TEMPLATE_RECORD);
+            captureBuilder.addTarget(textureSurface);
+            captureBuilder.addTarget(recorderSurface);
+
+            captureBuilder.set(CaptureRequest.SENSOR_SENSITIVITY, 200);
+            captureBuilder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, 33320700L);
+            // Disable auto-exposure
+            captureBuilder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF);
+            // Optionally, you can also disable auto white balance
+            captureBuilder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_OFF);
+
+
+
+            cameraDeviceFront.createCaptureSession(Arrays.asList(textureSurface, recorderSurface), new CameraCaptureSession.StateCallback() {
+                @Override
+                public void onConfigured(@NonNull CameraCaptureSession session) {
+                    cameraCaptureSessionFront = session;
+                    try {
+                        cameraCaptureSessionFront.setRepeatingRequest(captureBuilder.build(), captureCallback, null);
+                        mediaRecorderFront.start();
+                    } catch (CameraAccessException e) {
+                        e.printStackTrace();
+                    }
+                }
+
+                @Override
+                public void onConfigureFailed(@NonNull CameraCaptureSession session) {
+                }
+            }, null);
+        } catch (CameraAccessException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void createCameraPreviewSessionRear() {
+        try {
+            Surface textureSurface = new Surface(textureViewRear.getSurfaceTexture());
+            Surface recorderSurface = mediaRecorderRear.getSurface();
+
+            final CaptureRequest.Builder captureBuilder = cameraDeviceRear.createCaptureRequest(CameraDevice.TEMPLATE_RECORD);
+            captureBuilder.addTarget(textureSurface);
+            captureBuilder.addTarget(recorderSurface);
+
+            captureBuilder.set(CaptureRequest.SENSOR_SENSITIVITY, 200);
+            captureBuilder.set(CaptureRequest.SENSOR_EXPOSURE_TIME, 33320700L);
+            // Disable auto-exposure
+            captureBuilder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF);
+            // Optionally, you can also disable auto white balance
+            captureBuilder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_OFF);
+
+
+            cameraDeviceRear.createCaptureSession(Arrays.asList(textureSurface, recorderSurface), new CameraCaptureSession.StateCallback() {
+                @Override
+                public void onConfigured(@NonNull CameraCaptureSession session) {
+                    cameraCaptureSessionRear = session;
+                    try {
+                        cameraCaptureSessionRear.setRepeatingRequest(captureBuilder.build(), captureCallback, null);
+                        mediaRecorderRear.start();
+                    } catch (CameraAccessException e) {
+                        e.printStackTrace();
+                    }
+                }
+
+                @Override
+                public void onConfigureFailed(@NonNull CameraCaptureSession session) {
+                }
+            }, null);
+        } catch (CameraAccessException e) {
+            e.printStackTrace();
+        }
+    }
+
+
+    private final CameraCaptureSession.CaptureCallback captureCallback = new CameraCaptureSession.CaptureCallback() {
+        @Override
+        public void onCaptureCompleted(@NonNull CameraCaptureSession session, @NonNull CaptureRequest request, @NonNull TotalCaptureResult result) {
+            try {
+                long timestamp = System.currentTimeMillis();
+                String cameraId = session.getDevice().getId();
+                Long exposureTime = result.get(CaptureResult.SENSOR_EXPOSURE_TIME);
+                Integer iso = result.get(CaptureResult.SENSOR_SENSITIVITY);
+
+                if (metadataWriter != null) {
+                    metadataWriter.write(timestamp + "," + cameraId + "," + exposureTime + "," + iso + "," + "\n");
+                    metadataWriter.flush();
+                } else {
+                    metadataWriter = new FileWriter(new File(getExternalFilesDir(null), startTimestamp + "_camera_metadata.csv"));
+                }
+                // Log the exposure values
+                Log.i("ExposureLog", cameraId + " Exposure Time: " + exposureTime + " ns, ISO: " + iso);
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+    };
+
+
 
     @Override
     protected void onResume() {
